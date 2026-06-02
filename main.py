@@ -45,13 +45,7 @@ from utils.overlay import (
 )
 
 # ===========================================================================
-# Shared state dict — used by background thread (NOT st.session_state)
-# ===========================================================================
-
-_shared_state: dict = {}
-
-# ===========================================================================
-# Page config
+# Page config — must be the first Streamlit command
 # ===========================================================================
 
 st.set_page_config(
@@ -60,6 +54,17 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# ===========================================================================
+# Shared state dict — used by background thread (NOT st.session_state)
+# Must be cached so the same dict object survives across st.rerun() calls.
+# ===========================================================================
+
+@st.cache_resource
+def _get_shared_state() -> dict:
+    return {}
+
+_shared_state = _get_shared_state()
 
 # ===========================================================================
 # Session state initialization
