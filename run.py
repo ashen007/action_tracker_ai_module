@@ -202,6 +202,7 @@ def launch_streamlit():
         "--server.port", "8501",
         "--server.address", "localhost",
         "--browser.gatherUsageStats", "false",
+        "--server.fileWatcherType", "none",
     ])
 
 

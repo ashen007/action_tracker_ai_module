@@ -1,7 +1,7 @@
 """
 pose_estimator.py
 -----------------
-YOLOv8n-pose wrapper for body keypoint extraction on person crops.
+YOLO11n-pose wrapper for body keypoint extraction on person crops.
 Returns 17 COCO keypoints per person.
 """
 
@@ -32,7 +32,7 @@ class PoseEstimator:
     Returns normalized keypoints relative to the crop.
     """
 
-    def __init__(self, model_path: str = "yolov8n-pose.pt", device: str = "cpu"):
+    def __init__(self, model_path: str = "yolo11n-pose.pt", device: str = "cpu"):
         self.model_path = model_path
         self.device = device
         self._model = None
