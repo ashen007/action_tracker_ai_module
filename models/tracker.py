@@ -158,13 +158,13 @@ class FallbackTracker:
             }
             self._next_id += 1
 
-        self._age_tracks()
-
         results = []
         for tid, track in self._tracks.items():
             if track["age"] == 0:  # only active this frame
                 x1, y1, x2, y2 = track["bbox"]
                 results.append((tid, x1, y1, x2, y2, track["conf"]))
+
+        self._age_tracks()
         return results
 
     def _age_tracks(self):
