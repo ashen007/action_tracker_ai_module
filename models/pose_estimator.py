@@ -63,7 +63,8 @@ class PoseEstimator:
             for r in results:
                 if r.keypoints is not None and len(r.keypoints.data) > 0:
                     kps = r.keypoints.data[0].cpu().numpy()  # (17, 3)
-                    return kps
+                    if kps.shape == (17, 3):
+                        return kps
             return None
         except Exception as e:
             print(f"[Pose] Inference error: {e}")
@@ -83,6 +84,8 @@ class PoseEstimator:
     @staticmethod
     def get_visible_keypoints(kps: Keypoints, conf_threshold: float = 0.3) -> Dict[str, Tuple]:
         """Return dict of name -> (x, y, conf) for visible keypoints."""
+        if kps is None or kps.ndim < 2 or kps.shape[0] < 17:
+            return {}
         visible = {}
         for name, idx in KP.items():
             x, y, c = kps[idx]
