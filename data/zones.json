@@ -1,0 +1,23 @@
+{
+  "zones": [
+    {
+      "id": "zone_001",
+      "name": "Restricted Area A",
+      "gps_coords": [
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [0.0, 0.0]
+      ],
+      "pixel_coords": [
+        [345, 555],
+        [8, 622],
+        [7, 774],
+        [350, 729]
+      ],
+      "prohibited": true,
+      "color": [255, 0, 0],
+      "description": "Restricted server room area — no unauthorized access"
+    }
+  ]
+}
