@@ -45,6 +45,12 @@ from utils.overlay import (
 )
 
 # ===========================================================================
+# Shared state dict — used by background thread (NOT st.session_state)
+# ===========================================================================
+
+_shared_state: dict = {}
+
+# ===========================================================================
 # Page config
 # ===========================================================================
 
@@ -128,9 +134,39 @@ def start_processing(models: dict):
     st.session_state.person_table = []
     st.session_state.heatmap = None
 
+    # Copy everything the thread needs into a plain dict so the background
+    # thread never touches st.session_state (which is not thread-safe).
+    _shared_state.clear()
+    _shared_state.update({
+        # Input objects
+        "source":        st.session_state.source,
+        "zone_mgr":      st.session_state.zone_mgr,
+        "dwell_tracker": st.session_state.dwell_tracker,
+        "logger":        st.session_state.logger,
+        # Display toggles (read by thread)
+        "show_bbox":     st.session_state.show_bbox,
+        "show_zones":    st.session_state.show_zones,
+        "show_actions":  st.session_state.show_actions,
+        "show_dwell":    st.session_state.show_dwell,
+        # Control flags (written by main thread, read by worker thread)
+        "stop_flag":     False,
+        "paused":        False,
+        # Output slots (written by worker thread, read by main thread)
+        "frame_idx":     0,
+        "fps":           0.0,
+        "fps_times":     [],
+        "heatmap":       None,
+        "latest_frame":  None,
+        "active_tracks": [],
+        "violation_active": False,
+        "events":        [],
+        "person_table":  [],
+        "running":       True,
+    })
+
     thread = threading.Thread(
         target=_proc_loop,
-        args=(st.session_state, models),
+        args=(_shared_state, models),
         daemon=True,
     )
     thread.start()
@@ -138,21 +174,24 @@ def start_processing(models: dict):
     st.session_state.running = True
 
 
-def _proc_loop(state, models: dict):
-    """Background processing — writes results directly to session_state."""
-    source = state.source
-    detector = models["detector"]  # pulled from cache, not session_state
-    tracker = models["tracker"]
-    pose = models["pose"]
-    action_clf = models["action_clf"]
-    zone_mgr = state.zone_mgr
-    dwell_tracker = state.dwell_tracker
-    logger = state.logger
+def _proc_loop(state: dict, models: dict):
+    """
+    Background processing — reads/writes the plain _shared_state dict.
+    Never accesses st.session_state.
+    """
+    source        = state["source"]
+    detector      = models["detector"]
+    tracker       = models["tracker"]
+    pose          = models["pose"]
+    action_clf    = models["action_clf"]
+    zone_mgr      = state["zone_mgr"]
+    dwell_tracker = state["dwell_tracker"]
+    logger        = state["logger"]
 
     heatmap_initialized = False
 
-    while not state.stop_flag:
-        if state.paused:
+    while not state["stop_flag"]:
+        if state["paused"]:
             time.sleep(0.05)
             continue
         if not source or not source.is_open():
@@ -166,18 +205,19 @@ def _proc_loop(state, models: dict):
             continue
 
         now = time.time()
-        state.frame_idx += 1
+        state["frame_idx"] += 1
         ts = source.get_timestamp() or now
 
         # FPS
-        state.fps_times = [t for t in state.fps_times if now - t <= 1.0]
-        state.fps_times.append(now)
-        state.fps = len(state.fps_times)
+        fps_times = [t for t in state["fps_times"] if now - t <= 1.0]
+        fps_times.append(now)
+        state["fps_times"] = fps_times
+        state["fps"] = len(fps_times)
 
         frame_h, frame_w = frame.shape[:2]
 
         if not heatmap_initialized:
-            state.heatmap = np.zeros((frame_h // 4, frame_w // 4), dtype=np.float32)
+            state["heatmap"] = np.zeros((frame_h // 4, frame_w // 4), dtype=np.float32)
             heatmap_initialized = True
 
         # Detection
@@ -186,6 +226,7 @@ def _proc_loop(state, models: dict):
 
         # Tracking
         tracks = tracker.update(ds_input, frame) if tracker else []
+        print(f"[Debug] Frame {state['frame_idx']} | detections={len(detections)} tracks={len(tracks)}")
         active_ids = [t[0] for t in tracks]
         dwell_tracker.deactivate_missing(active_ids, ts)
 
@@ -221,16 +262,16 @@ def _proc_loop(state, models: dict):
                 violations_this_frame.extend(prohibited)
                 dwell_tracker.increment_violation(tid)
                 for z in prohibited:
-                    evt = logger.log_zone_violation(tid, state.frame_idx, ts, z.id, z.name, action, [x1, y1, x2, y2])
-                    state.events = state.events[-49:] + [evt]
+                    evt = logger.log_zone_violation(tid, state["frame_idx"], ts, z.id, z.name, action, [x1, y1, x2, y2])
+                    state["events"] = state["events"][-49:] + [evt]
 
             is_loitering = dwell_tracker.is_loitering(tid)
 
             # Draw bbox
-            if state.show_bbox:
+            if state["show_bbox"]:
                 draw_person(frame, tid, x1, y1, x2, y2,
-                            action=action if state.show_actions else "",
-                            dwell_str=dwell_rec.format_dwell() if state.show_dwell else "",
+                            action=action if state["show_actions"] else "",
+                            dwell_str=dwell_rec.format_dwell() if state["show_dwell"] else "",
                             is_violation=is_violation,
                             is_loitering=is_loitering,
                             conf=conf)
@@ -256,23 +297,23 @@ def _proc_loop(state, models: dict):
                 action, dwell_rec.action_history,
             )
 
-        state.person_table = person_rows
-        state.active_tracks = tracks
-        state.violation_active = len(violations_this_frame) > 0
+        state["person_table"] = person_rows
+        state["active_tracks"] = tracks
+        state["violation_active"] = len(violations_this_frame) > 0
 
         # Heatmap
-        if tracks and state.heatmap is not None:
+        if tracks and state["heatmap"] is not None:
             scaled = [(t[0], t[1]//4, t[2]//4, t[3]//4, t[4]//4, t[5]) for t in tracks]
-            state.heatmap = update_heatmap(state.heatmap, scaled)
+            state["heatmap"] = update_heatmap(state["heatmap"], scaled)
 
         # Zone overlays
-        if state.show_zones and zone_mgr:
+        if state["show_zones"] and zone_mgr:
             frame = zone_mgr.draw_all_zones(frame)
             for z in violations_this_frame:
                 z.draw_violation_flash(frame)
 
         # HUD
-        draw_fps_counter(frame, state.fps, state.frame_idx)
+        draw_fps_counter(frame, state["fps"], state["frame_idx"])
         stats = dwell_tracker.get_stats()
         draw_stats_overlay(frame,
                            total_persons=stats.get("total_tracked", 0),
@@ -283,19 +324,41 @@ def _proc_loop(state, models: dict):
             names = ", ".join(z.name for z in violations_this_frame)
             draw_alert_banner(frame, f"ZONE VIOLATION — {names}")
 
-        state.latest_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        state["latest_frame"] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         # Save heatmap periodically
-        if state.frame_idx % 150 == 0 and logger and state.heatmap is not None:
-            logger.save_heatmap(state.heatmap)
+        if state["frame_idx"] % 150 == 0 and logger and state["heatmap"] is not None:
+            logger.save_heatmap(state["heatmap"])
 
-    state.running = False
-    state.stop_flag = False
+    state["running"] = False
+    state["stop_flag"] = False
     if logger:
         logger.flush()
         logger.flush_summary()
     print("[main] Processing loop finished.")
 
+
+# ===========================================================================
+# Sync helper — copies _shared_state outputs back into st.session_state
+# ===========================================================================
+
+def sync_shared_to_session():
+    """Call once per rerun to pull thread results into session_state."""
+    if not _shared_state:
+        return
+    st.session_state.latest_frame    = _shared_state.get("latest_frame")
+    st.session_state.frame_idx       = _shared_state.get("frame_idx", 0)
+    st.session_state.fps             = _shared_state.get("fps", 0.0)
+    st.session_state.heatmap         = _shared_state.get("heatmap")
+    st.session_state.events          = _shared_state.get("events", [])
+    st.session_state.person_table    = _shared_state.get("person_table", [])
+    st.session_state.violation_active = _shared_state.get("violation_active", False)
+    st.session_state.active_tracks   = _shared_state.get("active_tracks", [])
+    # If thread finished, mark session as stopped
+    if not _shared_state.get("running", True):
+        st.session_state.running = False
+
+sync_shared_to_session()
 
 # ===========================================================================
 # Header
@@ -357,6 +420,13 @@ with left_col:
     st.session_state.show_actions = show_actions
     st.session_state.show_dwell   = show_dwell
 
+    # Propagate toggle changes to running thread
+    if _shared_state:
+        _shared_state["show_bbox"]    = show_bbox
+        _shared_state["show_zones"]   = show_zones
+        _shared_state["show_actions"] = show_actions
+        _shared_state["show_dwell"]   = show_dwell
+
     # Source info
     if st.session_state.source and st.session_state.source.is_open():
         info = st.session_state.source.get_info()
@@ -381,9 +451,9 @@ with left_col:
     with btn_col3:
         stop_clicked  = st.button("⏹ Stop",  use_container_width=True)
 
-    # Handle button actions
+    # ---- Start ----
     if start_clicked and not st.session_state.running:
-        models = load_models(conf_threshold)  # cached, not copied
+        models = load_models(conf_threshold)
 
         session_id = uuid.uuid4().hex[:8]
         st.session_state.session_id = session_id
@@ -392,7 +462,6 @@ with left_col:
         st.session_state.dwell_tracker = DwellTracker(dwell_threshold=dwell_threshold)
         st.session_state.logger = EventLogger(session_id)
 
-        # Store zone_mgr and dwell_tracker references only
         if zones_file:
             zone_data = json.loads(zones_file.read())
             zm = ZoneManager()
@@ -415,22 +484,31 @@ with left_col:
 
         if ok:
             st.session_state.source = source
-            start_processing(models)  # pass models directly
+            start_processing(models)
             st.success(f"Session {session_id} started!")
         else:
             st.error("Could not open video source.")
 
+    # ---- Pause / Resume ----
     if pause_clicked and st.session_state.running:
-        st.session_state.paused = not st.session_state.paused
+        new_paused = not st.session_state.paused
+        st.session_state.paused = new_paused
+        # Tell the thread
+        if _shared_state:
+            _shared_state["paused"] = new_paused
+        # Also pause/resume the VideoSource for file playback
         if st.session_state.source:
-            if st.session_state.paused:
+            if new_paused:
                 st.session_state.source.pause()
             else:
                 st.session_state.source.resume()
 
+    # ---- Stop ----
     if stop_clicked:
         st.session_state.stop_flag = True
         st.session_state.running = False
+        if _shared_state:
+            _shared_state["stop_flag"] = True
         if st.session_state.source:
             st.session_state.source.stop()
         st.info("Session stopped.")
@@ -442,9 +520,12 @@ with left_col:
 with center_col:
     st.subheader("🎬 Live Feed")
 
-    status_badge = "🟢 LIVE" if (st.session_state.running and not st.session_state.paused) else \
-                   "⏸ PAUSED" if st.session_state.paused else "⚫ IDLE"
-    fps_text = f"FPS: {st.session_state.fps:.1f}" if st.session_state.running else ""
+    status_badge = (
+        "🟢 LIVE"   if (st.session_state.running and not st.session_state.paused) else
+        "⏸ PAUSED" if st.session_state.paused else
+        "⚫ IDLE"
+    )
+    fps_text   = f"FPS: {st.session_state.fps:.1f}"   if st.session_state.running else ""
     frame_text = f"Frame: {st.session_state.frame_idx}" if st.session_state.running else ""
 
     st.markdown(
@@ -456,11 +537,9 @@ with center_col:
         unsafe_allow_html=True
     )
 
-    # Violation alert
     if st.session_state.violation_active:
         st.error("⚠️  ACTIVE ZONE VIOLATION DETECTED")
 
-    # Video display placeholder
     video_placeholder = st.empty()
 
     if st.session_state.latest_frame is not None:
@@ -484,7 +563,6 @@ with center_col:
 with right_col:
     st.subheader("📊 Metrics")
 
-    # Live stats
     stats = st.session_state.dwell_tracker.get_stats() if st.session_state.dwell_tracker else {}
 
     m1, m2 = st.columns(2)
@@ -496,7 +574,6 @@ with right_col:
 
     st.markdown("---")
 
-    # Event log
     st.markdown("**📋 Live Event Log**")
     events = st.session_state.events[-20:]
     if events:
@@ -514,7 +591,6 @@ with right_col:
 
     st.markdown("---")
 
-    # Per-person table
     st.markdown("**👤 Person Tracking Table**")
     if st.session_state.person_table:
         df_persons = pd.DataFrame(st.session_state.person_table)
@@ -529,12 +605,10 @@ with right_col:
 st.divider()
 tab1, tab2, tab3, tab4 = st.tabs(["🌡️ Heatmap", "⏱ Dwell Time Chart", "🎭 Action Breakdown", "💾 Export"])
 
-# -- Tab 1: Heatmap --
 with tab1:
     st.subheader("Position Heatmap")
     if st.session_state.heatmap is not None and st.session_state.heatmap.sum() > 0:
         h_arr = st.session_state.heatmap
-        # Normalize and apply colormap
         norm = cv2.normalize(h_arr.astype(np.float32), None, 0, 255, cv2.NORM_MINMAX)
         colored = cv2.applyColorMap(norm.astype(np.uint8), cv2.COLORMAP_JET)
         colored_rgb = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
@@ -542,7 +616,6 @@ with tab1:
     else:
         st.info("Heatmap will appear after processing starts.")
 
-# -- Tab 2: Dwell Time Chart --
 with tab2:
     st.subheader("Top Dwell Times")
     if st.session_state.dwell_tracker:
@@ -565,11 +638,13 @@ with tab2:
     else:
         st.info("Start processing to see dwell times.")
 
-# -- Tab 3: Action Breakdown --
 with tab3:
     st.subheader("Action Distribution")
-    if st.session_state.action_clf:
-        dist = st.session_state.action_clf.get_action_distribution()
+    # action_clf lives in the cached models dict, retrieve it safely
+    _cached_models = load_models(st.session_state.conf_threshold)
+    action_clf_ref = _cached_models.get("action_clf") if _cached_models else None
+    if action_clf_ref:
+        dist = action_clf_ref.get_action_distribution()
         if dist:
             df_actions = pd.DataFrame.from_dict(
                 {"Action": list(dist.keys()), "Count": list(dist.values())}
@@ -580,7 +655,6 @@ with tab3:
     else:
         st.info("Start processing to see action distribution.")
 
-# -- Tab 4: Export --
 with tab4:
     st.subheader("Export Session Data")
     if st.session_state.logger:
@@ -611,7 +685,7 @@ with tab4:
         st.info("Start a session to export data.")
 
 # ===========================================================================
-# Auto-refresh while running
+# Sync shared state → session_state, then auto-rerun while live
 # ===========================================================================
 
 if st.session_state.running and not st.session_state.paused:
