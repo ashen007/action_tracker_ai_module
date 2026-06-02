@@ -114,8 +114,10 @@ class FallbackTracker:
         detections: List,
         frame: np.ndarray,
     ) -> List[TrackResult]:
+        # Age tracks first so unmatched ones accumulate age; matched/new get reset to 0 below.
+        self._age_tracks()
+
         if not detections:
-            self._age_tracks()
             return []
 
         # Convert detections from [x1,y1,w,h] to [x1,y1,x2,y2]
@@ -160,7 +162,7 @@ class FallbackTracker:
 
         results = []
         for tid, track in self._tracks.items():
-            if track["age"] == 0:  # only active this frame
+            if track["age"] == 0:  # active this frame
                 x1, y1, x2, y2 = track["bbox"]
                 results.append((tid, x1, y1, x2, y2, track["conf"]))
 

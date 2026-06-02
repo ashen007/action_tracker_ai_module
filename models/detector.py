@@ -1,7 +1,7 @@
 """
 detector.py
 -----------
-YOLOv8s person detection wrapper using ultralytics.
+YOLO11s person detection wrapper using ultralytics.
 Filters results to 'person' class only (class_id=0).
 """
 
@@ -24,7 +24,7 @@ class PersonDetector:
 
     def __init__(
         self,
-        model_path: str = "yolov8s.pt",
+        model_path: str = "yolo11s.pt",
         conf_threshold: float = 0.5,
         device: str = "cpu",
     ):
@@ -37,7 +37,7 @@ class PersonDetector:
     def _load_model(self):
         try:
             from ultralytics import YOLO
-            print(f"[Detector] Loading YOLOv8 from '{self.model_path}' on {self.device}...")
+            print(f"[Detector] Loading YOLO11 from '{self.model_path}' on {self.device}...")
             self._model = YOLO(self.model_path)
             print("[Detector] Model loaded successfully.")
         except Exception as e:
